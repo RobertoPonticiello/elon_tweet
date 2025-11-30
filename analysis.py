@@ -1,3 +1,12 @@
+"""Run horizon forecasts for Elon Musk posts using rolling Negative Binomial fits.
+
+This script ingests one of the exported CSV files, normalizes timestamps,
+builds daily post counts inside multiple trailing windows, fits a Negative
+Binomial regression per window (trend + day-of-week), and simulates the
+remaining posts inside a target window. The output consists of forecast
+tables printed to stdout plus PNG charts for each window.
+"""
+
 from __future__ import annotations
 
 import numpy as np
@@ -41,6 +50,7 @@ else:
 
 print(f"Loading data from {DATA_PATH} ...")
 def _parse_three_field_csv(path: Path) -> pd.DataFrame:
+    """Parse CSVs that contain id, body, created_at without proper quoting."""
     text = path.read_text()
     newline_idx = text.find("\n")
     if newline_idx == -1:
@@ -184,6 +194,7 @@ elapsed_seconds = min(elapsed_seconds, 24 * 3600)
 remaining_fraction_today = max(0.0, 1.0 - elapsed_seconds / (24 * 3600))
 
 def run_window(label: str, window_start: pd.Timestamp, seed_offset: int) -> dict:
+    """Train and simulate a single window and return summary statistics."""
     window_df = filtered[filtered["createdAt"] >= window_start].copy()
     if window_df.empty:
         raise ValueError(f"No data available inside requested window '{label}'.")

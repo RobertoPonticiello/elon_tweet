@@ -1,3 +1,10 @@
+"""Summarize historical Elon Musk posting horizons for quick reference tables.
+
+This helper ingests the manual CSV export, reconstructs timezone-aware
+timestamps, computes descriptive stats for several trailing windows, and writes
+the results to ``horizon_summary.csv``.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -18,6 +25,7 @@ class WindowSpec:
 
 
 def _parse_three_field_csv(path: Path) -> pd.DataFrame:
+    """Read custom three-column CSV files that lack standard quoting."""
     text = path.read_text()
     newline_idx = text.find("\n")
     if newline_idx == -1:
@@ -68,6 +76,7 @@ def _parse_three_field_csv(path: Path) -> pd.DataFrame:
 
 
 def _coerce_datetimes(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize naive timestamp strings into a timezone-aware column."""
     df = df.copy()
     # created_at strings look like "Jan 1, 12:18:52 AM EST" (no year), so append 2025.
     dt_series = pd.to_datetime(
@@ -91,6 +100,7 @@ def _coerce_datetimes(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def window_stats(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp) -> dict:
+    """Calculate posting stats for a closed-open window [start, end)."""
     start = pd.Timestamp(start).tz_convert(TZ).floor("D")
     end = pd.Timestamp(end).tz_convert(TZ).ceil("D")
     mask = (df["created_at_dt"] >= start) & (df["created_at_dt"] < end)
