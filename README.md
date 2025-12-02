@@ -6,6 +6,7 @@ Questo repository contiene due script Python pensati per analizzare la frequenza
 ## Struttura dei dati
 - `elonmusk (2).csv`: esportazione manuale con tre colonne (id, body, created_at) prive di quoting standard.
 - `elon_posts.csv` / `all_musk_posts.csv`: eventuali esportazioni alternative con schema standard.
+- `elonmusk-Elon_Musk___tweets_November_25___December_2__2025_-daily-metrics.csv`: file con conteggi giornalieri manuali (vedi sezione dedicata) per coprire giorni successivi all'ultimo export grezzo.
 - `horizon_summary.csv`: tabella prodotta da `horizon_stats.py` con metriche aggregate per piu' orizzonti temporali.
 - `daily_counts_*.png`: grafici creati da `analysis.py` per ogni finestra considerata.
 
@@ -32,9 +33,15 @@ Questo repository contiene due script Python pensati per analizzare la frequenza
 ## Come eseguire
 ```bash
 pip install -r requirements.txt  # oppure installa manualmente i pacchetti richiesti
-python analysis.py
+python analysis.py --window-start 2025-11-28 --window-end 2025-12-09 --time-remaining 7D --known-total 0
 python horizon_stats.py
 ```
+
+`analysis.py` ora espone tutti i parametri principali via CLI:
+- `--window-start` / `--window-end`: estremi (UTC) della finestra da simulare.
+- `--time-remaining`: durata che separa "adesso" dalla fine finestra (Timedelta tipo `3D12H`).
+- `--known-total`: post gia' contati nella finestra (sottratti ai forecast).
+- `--current-timestamp`: in alternativa a `--time-remaining`, passa l'istante UTC dell'ultimo post censito.
 
 Entrambi gli script scrivono i risultati nella radice del progetto. `analysis.py` mostra stampe verbose: per ridurre l output e' possibile commentare alcune `print` oppure reindirizzare lo stdout su file.
 
@@ -42,6 +49,15 @@ Entrambi gli script scrivono i risultati nella radice del progetto. `analysis.py
 1. Scarica un nuovo CSV con le tre colonne richieste e rinominalo in `elonmusk (2).csv`.
 2. Verifica che i timestamp riportino mese, giorno e orario nel fuso di New York.
 3. Lancia gli script per rigenerare grafici e tabelle.
+
+### Aggiornare manualmente i giorni piu' recenti
+Quando l export completo non e' ancora disponibile, utilizza `elonmusk-Elon_Musk___tweets_November_25___December_2__2025_-daily-metrics.csv` come diario giornaliero:
+
+1. Ogni riga segue il formato `YYYY-MM-DD,POSTS,cumulative_posts`. Il terzo campo e' opzionale: se vuoi puoi aggiornarlo con la somma progressiva, ma il software usa solo la colonna `posts`.
+2. Aggiungi (o modifica) una riga per ogni data oltre l ultimo giorno contenuto in `elonmusk (2).csv`. `analysis.py` ignora automaticamente le date gia' coperte dal dataset grezzo, quindi non rischi doppi conteggi.
+3. Salva il file in CSV (testo semplice, separatore `,`). Alla successiva esecuzione, lo script generera' tweet sintetici per quei giorni cosi' da includerli nelle medie giornaliere e nelle simulazioni.
+
+In questo modo ti basta appendere due numeri per giorno: non servono ID dei singoli post. Quando l export completo sara' disponibile potrai sostituire `elonmusk (2).csv` e svuotare (o aggiornare) il file manuale.
 
 ## Risoluzione problemi
 - **File mancante**: se nessun CSV viene trovato, assicurati che almeno uno dei percorsi in `DATA_CANDIDATES` esista.

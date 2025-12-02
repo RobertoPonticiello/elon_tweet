@@ -9,6 +9,7 @@ tables printed to stdout plus PNG charts for each window.
 
 from __future__ import annotations
 
+import argparse
 import numpy as np
 import pandas as pd
 import seaborn as sns
@@ -21,24 +22,82 @@ from pandas.api import types as ptypes
 
 sns.set_theme(style="whitegrid")
 
-WINDOW_START = pd.Timestamp("2025-11-25", tz="UTC")
-WINDOW_END = pd.Timestamp("2025-12-02", tz="UTC")
-TIME_REMAINING = pd.Timedelta(days=4, hours=2)
-KNOWN_TOTAL = 135  # posts already counted inside the market window
+DEFAULT_WINDOW_START = "2025-11-28"
+DEFAULT_WINDOW_END = "2025-12-09"
+DEFAULT_TIME_REMAINING = "7D"
+DEFAULT_KNOWN_TOTAL = 0
 
-window_end_exclusive = WINDOW_END + pd.Timedelta(days=1)
-CURRENT_TIMESTAMP = window_end_exclusive - TIME_REMAINING
-if CURRENT_TIMESTAMP.tzinfo is None:
-    CURRENT_TIMESTAMP = CURRENT_TIMESTAMP.tz_localize("UTC")
 
-print(
-    f"Using implied current timestamp {CURRENT_TIMESTAMP:%Y-%m-%d %H:%M %Z}"
-    f" based on {TIME_REMAINING} remaining until end-of-day {WINDOW_END.date()}."
-)
+def ensure_utc(ts: str | pd.Timestamp, label: str) -> pd.Timestamp:
+    """Parse timestamps and guarantee UTC timezone awareness."""
+    try:
+        parsed = pd.Timestamp(ts)
+    except Exception as exc:  # pragma: no cover - defensive
+        raise ValueError(f"Invalid value for {label}: {ts}") from exc
+    if parsed.tzinfo is None:
+        return parsed.tz_localize("UTC")
+    return parsed.tz_convert("UTC")
+
+
+def parse_cli_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Configure forecast horizon inputs.")
+    parser.add_argument(
+        "--window-start",
+        default=DEFAULT_WINDOW_START,
+        help="Start date (UTC) of the forecast window, e.g. 2025-11-28.",
+    )
+    parser.add_argument(
+        "--window-end",
+        default=DEFAULT_WINDOW_END,
+        help="End date (UTC) of the forecast window, e.g. 2025-12-09.",
+    )
+    parser.add_argument(
+        "--time-remaining",
+        default=DEFAULT_TIME_REMAINING,
+        help="Time remaining until window end (pandas Timedelta string, e.g. '2D12H').",
+    )
+    parser.add_argument(
+        "--known-total",
+        "--current-total",
+        type=int,
+        default=DEFAULT_KNOWN_TOTAL,
+        dest="known_total",
+        help="Posts already counted inside the window.",
+    )
+    parser.add_argument(
+        "--current-timestamp",
+        help="Explicit timestamp for the latest counted post (UTC). Overrides time-remaining logic.",
+    )
+    return parser.parse_args()
+
+
+args = parse_cli_args()
+WINDOW_START = ensure_utc(args.window_start, "window-start")
+WINDOW_END = ensure_utc(args.window_end, "window-end")
+time_remaining_literal = args.time_remaining.replace("H", "h")
+TIME_REMAINING = pd.Timedelta(time_remaining_literal)
+KNOWN_TOTAL = int(args.known_total)
+
+if args.current_timestamp:
+    CURRENT_TIMESTAMP = ensure_utc(args.current_timestamp, "current-timestamp")
+    print(
+        f"Using provided current timestamp {CURRENT_TIMESTAMP:%Y-%m-%d %H:%M %Z};"
+        f" ignoring --time-remaining ({TIME_REMAINING})."
+    )
+else:
+    window_end_exclusive = WINDOW_END + pd.Timedelta(days=1)
+    CURRENT_TIMESTAMP = window_end_exclusive - TIME_REMAINING
+    print(
+        f"Using implied current timestamp {CURRENT_TIMESTAMP:%Y-%m-%d %H:%M %Z}"
+        f" based on {TIME_REMAINING} remaining until end-of-day {WINDOW_END.date()}."
+    )
 
 MANUAL_PARSE_NAME = "elonmusk (2).csv"
 SOURCE_TZ = "America/New_York"
 DATA_CANDIDATES = [Path(MANUAL_PARSE_NAME), Path("elon_posts.csv"), Path("all_musk_posts.csv")]
+MANUAL_DAILY_COUNTS_PATH = Path(
+    "elonmusk-Elon_Musk___tweets_November_25___December_2__2025_-daily-metrics.csv"
+)
 for candidate in DATA_CANDIDATES:
     if candidate.exists():
         DATA_PATH = candidate
@@ -102,8 +161,11 @@ def _parse_three_field_csv(path: Path) -> pd.DataFrame:
 if DATA_PATH.name == MANUAL_PARSE_NAME:
     df = _parse_three_field_csv(DATA_PATH)
     print(f"Parsed {len(df):,} rows from manual three-field CSV")
+    created_str = df["created_at"].astype(str).str.strip()
+    created_str = created_str.str.replace(r"\s+[A-Z]{2,4}$", "", regex=True)
     dt_series = pd.to_datetime(
-        df["created_at"].str.strip() + " 2025",
+        created_str + " 2025",
+        format="%b %d, %I:%M:%S %p %Y",
         errors="coerce",
     )
     if dt_series.isna().any():
@@ -126,6 +188,62 @@ def str_to_bool(series: pd.Series) -> pd.Series:
     """Convert string/object True/False/NaN flags to booleans."""
     lowered = series.astype(str).str.lower()
     return lowered == "true"
+
+
+def load_manual_daily_counts(path: Path) -> pd.DataFrame | None:
+    """Load date-level post counts supplied manually for dates beyond the raw export."""
+    if not path.exists():
+        return None
+
+    manual = pd.read_csv(path)
+    expected_cols = {"date", "posts"}
+    if not expected_cols.issubset(manual.columns):
+        cols = ", ".join(manual.columns)
+        raise ValueError(
+            f"Manual daily counts file must contain columns {expected_cols}, found: {cols}"
+        )
+
+    manual["date"] = pd.to_datetime(manual["date"], utc=True, errors="coerce")
+    manual["date"] = manual["date"].dt.tz_convert("UTC")
+    manual["posts"] = pd.to_numeric(manual["posts"], errors="coerce")
+    manual = manual.dropna(subset=["date", "posts"])
+    manual = manual[manual["posts"] > 0]
+    if manual.empty:
+        return None
+
+    manual = manual.sort_values("date")
+    return manual[["date", "posts"]]
+
+
+def synthesize_manual_posts(
+    manual: pd.DataFrame, cutoff_ts: pd.Timestamp | None
+) -> pd.DataFrame | None:
+    """Expand daily aggregate counts into synthetic rows for resampling."""
+    manual = manual.copy()
+    if cutoff_ts is not None:
+        cutoff_date = cutoff_ts.date()
+        manual = manual[manual["date"].dt.date > cutoff_date]
+    if manual.empty:
+        return None
+
+    expanded_rows = []
+    for record in manual.itertuples(index=False):
+        base_ts = record.date.normalize()
+        count = int(record.posts)
+        for idx in range(count):
+            expanded_rows.append(
+                {
+                    "id": f"manual-{base_ts.date()}-{idx+1}",
+                    "text": "",
+                    "createdAt": base_ts + pd.Timedelta(minutes=idx),
+                }
+            )
+
+    if not expanded_rows:
+        return None
+
+    manual_df = pd.DataFrame(expanded_rows)
+    return manual_df
 
 # --- Task 1: Market rule filters -----------------------------------------
 # Rule mapping notes:
@@ -159,8 +277,23 @@ else:
     print("\nDataset lacks reply/quote/retweet flags; using all rows without additional filtering.")
     filtered = df.copy()
 
+manual_counts = load_manual_daily_counts(MANUAL_DAILY_COUNTS_PATH)
+manual_extension = None
+if manual_counts is not None:
+    latest_observed = filtered["createdAt"].max() if not filtered.empty else None
+    manual_extension = synthesize_manual_posts(manual_counts, latest_observed)
+    if manual_extension is not None:
+        filtered = pd.concat([filtered, manual_extension], ignore_index=True)
+        print(
+            f"Injected {len(manual_extension)} synthetic posts sourced from {MANUAL_DAILY_COUNTS_PATH.name}."
+        )
+    else:
+        print("Manual daily counts present but no rows beyond observed data were added.")
+else:
+    print("No manual daily counts file found; proceeding with raw export only.")
+
 # --- Task 2+: Daily counts + modeling sensitivity -----------------------
-if ptypes.is_datetime64tz_dtype(filtered["createdAt"]):
+if isinstance(filtered["createdAt"].dtype, pd.DatetimeTZDtype):
     filtered["createdAt"] = filtered["createdAt"].dt.tz_convert("UTC")
 else:
     filtered["createdAt"] = pd.to_datetime(filtered["createdAt"], utc=True, errors="coerce")
